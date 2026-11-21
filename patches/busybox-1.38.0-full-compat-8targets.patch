@@ -1,0 +1,1201 @@
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/editors/vi.c b/editors/vi.c
+--- a/editors/vi.c	2026-02-08 03:41:20.000000000 +0800
++++ b/editors/vi.c	2026-11-06 19:12:33.704313444 +0800
+@@ -2389,7 +2389,7 @@
+ // search for pattern starting at p
+ static char *char_search(char *p, const char *pat, int dir_and_range)
+ {
+-	struct re_pattern_buffer preg;
++	struct re_pattern_buffer preg = { 0 };
+ 	const char *err;
+ 	char *q;
+ 	int i, size, range, start;
+@@ -2437,7 +2437,12 @@
+ 	//           struct pattern   char     int   int    int    struct reg
+ 	// re_search(*pattern_buffer, *string, size, start, range, *regs)
+ 	i = re_search(&preg, q, size, start, range, /*struct re_registers*:*/ NULL);
++#if BB_LIBC_HAS_GNU_REGEX
+ 	regfree(&preg);
++#else
++	if (preg.compiled)
++		regfree(&preg.rx);
++#endif
+ 	return i < 0 ? NULL : q + i;
+ }
+ # else
+@@ -2750,8 +2755,21 @@
+ 
+ 	regmatch[0].rm_so = 0;
+ 	regmatch[0].rm_eo = end_line(q) - q;
++#if defined(REG_STARTEND)
+ 	if (regexec(preg, q, MAX_SUBPATTERN, regmatch, REG_STARTEND) != 0)
+ 		return found;
++#else
++	{	/* musl has no REG_STARTEND: bound the match with a temporary NUL */
++		char save = q[regmatch[0].rm_eo];
++		int rc;
++
++		q[regmatch[0].rm_eo] = '\0';
++		rc = regexec(preg, q, MAX_SUBPATTERN, regmatch, 0);
++		q[regmatch[0].rm_eo] = save;
++		if (rc != 0)
++			return found;
++	}
++#endif
+ 
+ 	found = q + regmatch[0].rm_so;
+ 	*len_F = regmatch[0].rm_eo - regmatch[0].rm_so;
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/findutils/grep.c b/findutils/grep.c
+--- a/findutils/grep.c	2024-04-16 15:23:50.000000000 +0800
++++ b/findutils/grep.c	2026-11-06 19:02:48.652160685 +0800
+@@ -54,6 +54,7 @@
+ //kbuild:lib-$(CONFIG_FGREP) += grep.o
+ 
+ #include "libbb.h"
++
+ #include "common_bufsiz.h"
+ #include "xregex.h"
+ 
+@@ -868,8 +869,14 @@
+ 			pattern_head = pattern_head->link;
+ 			if (gl->flg_mem_allocated_compiled & ALLOCATED)
+ 				free(gl->pattern);
+-			if (gl->flg_mem_allocated_compiled & COMPILED)
++			if (gl->flg_mem_allocated_compiled & COMPILED) {
++#if BB_LIBC_HAS_GNU_REGEX
+ 				regfree(&gl->compiled_regex);
++#else
++				if (gl->compiled_regex.compiled)
++					regfree(&gl->compiled_regex.rx);
++#endif
++			}
+ 			free(gl);
+ 			free(pattern_head_ptr);
+ 		}
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/include/linux/pkt_sched.h b/include/linux/pkt_sched.h
+--- a/include/linux/pkt_sched.h	1970-01-01 07:30:00.000000000 +0730
++++ b/include/linux/pkt_sched.h	2026-11-06 16:26:14.000000000 +0800
+@@ -0,0 +1,98 @@
++/*
++ * bionic's <linux/pkt_sched.h> is a trimmed copy of the kernel UAPI header:
++ * it stops before the (deprecated but still supported) CBQ scheduler.
++ * networking/tc.c builds real CBQ netlink attributes, so re-add that ABI.
++ * The layouts below are byte-for-byte the kernel's: tc(8) hands them to
++ * the kernel through netlink, so they must not be reordered or padded.
++ */
++#ifndef BB_COMPAT_LINUX_PKT_SCHED_H
++#define BB_COMPAT_LINUX_PKT_SCHED_H
++
++#include_next <linux/pkt_sched.h>
++#include <linux/types.h>
++
++#ifndef BB_COMPAT_CBQ_DEFINED
++#define BB_COMPAT_CBQ_DEFINED
++
++/* CBQ section */
++
++#define TC_CBQ_MAXPRIO		8
++#define TC_CBQ_MAXLEVEL		8
++#define TC_CBQ_DEF_EWMA		5
++
++struct tc_cbq_lssopt {
++	unsigned char	change;
++	unsigned char	flags;
++#define TCF_CBQ_LSS_BOUNDED	1
++#define TCF_CBQ_LSS_ISOLATED	2
++	unsigned char	ewma_log;
++	unsigned char	level;
++#define TCF_CBQ_LSS_FLAGS	1
++#define TCF_CBQ_LSS_EWMA	2
++#define TCF_CBQ_LSS_MAXIDLE	4
++#define TCF_CBQ_LSS_MINIDLE	8
++#define TCF_CBQ_LSS_OFFTIME	0x10
++#define TCF_CBQ_LSS_AVPKT	0x20
++	__u32		maxidle;
++	__u32		minidle;
++	__u32		offtime;
++	__u32		avpkt;
++};
++
++struct tc_cbq_wrropt {
++	unsigned char	flags;
++	unsigned char	priority;
++	unsigned char	cpriority;
++	unsigned char	__reserved;
++	__u32		allot;
++	__u32		weight;
++};
++
++struct tc_cbq_ovl {
++	unsigned char	strategy;
++#define	TC_CBQ_OVL_CLASSIC	0
++#define	TC_CBQ_OVL_DELAY	1
++#define	TC_CBQ_OVL_LOWPRIO	2
++#define	TC_CBQ_OVL_DROP		3
++#define	TC_CBQ_OVL_RCLASSIC	4
++	unsigned char	priority2;
++	__u16		pad;
++	__u32		penalty;
++};
++
++struct tc_cbq_police {
++	unsigned char	police;
++	unsigned char	__res1;
++	unsigned short	__res2;
++};
++
++struct tc_cbq_fopt {
++	__u32		split;
++	__u32		defmap;
++	__u32		defchange;
++};
++
++struct tc_cbq_xstats {
++	__u32		borrows;
++	__u32		overactions;
++	__s32		avgidle;
++	__s32		undertime;
++};
++
++enum {
++	TCA_CBQ_UNSPEC,
++	TCA_CBQ_LSSOPT,
++	TCA_CBQ_WRROPT,
++	TCA_CBQ_FOPT,
++	TCA_CBQ_OVL_STRATEGY,
++	TCA_CBQ_RATE,
++	TCA_CBQ_RTAB,
++	TCA_CBQ_POLICE,
++	__TCA_CBQ_MAX,
++};
++
++#define TCA_CBQ_MAX	(__TCA_CBQ_MAX - 1)
++
++#endif /* BB_COMPAT_CBQ_DEFINED */
++
++#endif /* BB_COMPAT_LINUX_PKT_SCHED_H */
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/include/netinet/ether.h b/include/netinet/ether.h
+--- a/include/netinet/ether.h	1970-01-01 07:30:00.000000000 +0730
++++ b/include/netinet/ether.h	2026-11-06 16:26:14.000000000 +0800
+@@ -0,0 +1,18 @@
++/*
++ * bionic's <netinet/ether.h> declares ether_ntoa/ether_aton but not the
++ * /etc/ethers lookup helper ether_hostton() that ether-wake uses.
++ */
++#ifndef BB_COMPAT_NETINET_ETHER_H
++#define BB_COMPAT_NETINET_ETHER_H
++
++#include_next <netinet/ether.h>
++#include <net/ethernet.h>
++
++__BEGIN_DECLS
++
++/* returns 0 when the hostname was found in /etc/ethers, -1 otherwise */
++int ether_hostton(const char *__hostname, struct ether_addr *__addr);
++
++__END_DECLS
++
++#endif /* BB_COMPAT_NETINET_ETHER_H */
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/include/platform.h b/include/platform.h
+--- a/include/platform.h	2026-02-06 15:45:29.000000000 +0800
++++ b/include/platform.h	2026-11-06 19:58:31.126128630 +0800
+@@ -133,6 +133,14 @@
+ # endif
+ #endif
+ 
++/* Android x86 (bionic + clang): regparm(3)/stdcall is not supported and
++ * conflicts with bionic's own (cdecl) declarations of strchrnul/strsep/...
++ * Force plain calling convention there. */
++#if (defined(__ANDROID__) || defined(ANDROID)) && defined(__i386__)
++# undef FAST_FUNC
++# define FAST_FUNC
++#endif
++
+ /* Make all declarations hidden (-fvisibility flag only affects definitions) */
+ /* (don't include system headers after this until corresponding pop!) */
+ #if __GNUC_PREREQ(4,1) && !defined(__CYGWIN__)
+@@ -551,11 +559,54 @@
+ #  undef HAVE_WAIT3
+ # endif
+ # undef HAVE_MEMPCPY
+-# undef HAVE_STRCHRNUL
++# if !defined(__aarch64__) || __ANDROID_API__ < 21
++/* arm64 bionic provides strchrnul via dynamic_function_dispatch (API 21+) */
++#  undef HAVE_STRCHRNUL
++# endif
+ # undef HAVE_STRVERSCMP
+ # undef HAVE_UNLOCKED_LINE_OPS
+ # undef HAVE_NET_ETHERNET_H
+ # undef HAVE_PRINTF_PERCENTM
++/* bionic's <sys/param.h> lacks setbit/clrbit (glibc extension);
++ * libbb defines its own pair when HAVE_SETBIT is not set */
++# undef HAVE_SETBIT
++#endif
++
++#if defined(ANDROID) || defined(__ANDROID__)
++/*
++ * bionic neither declares nor implements these. Working replacements live
++ * in libbb/missing_syscalls.c so that the applets needing them
++ * (hostid, su, utmp/wtmp/last/runlevel, yescrypt) build and run.
++ */
++# include <utmpx.h>
++long gethostid(void);
++#if defined(__ANDROID__) || defined(ANDROID)
++int getlogin_r(char *buf, size_t bufsize);
++#endif
++#if defined(__BIONIC__)
++int vhangup(void);
++#endif
++#if defined(__BIONIC__)
++# include <glob.h>
++int glob(const char *pattern, int flags, int (*errfunc)(const char *path, int err), glob_t *pglob);
++void globfree(glob_t *pglob);
++#endif
++#if defined(__BIONIC__) && __ANDROID_API__ < 28
++int syncfs(int fd);
++ssize_t getrandom(void *buf, size_t buflen, unsigned int flags);
++#endif
++#if defined(__BIONIC__)
++# include <stdio.h>
++struct mntent;
++int addmntent(FILE *fp, const struct mntent *mnt);
++char *hasmntopt(const struct mntent *mnt, const char *opt);
++#endif
++void explicit_bzero(void *p, size_t len);
++char* getusershell(void);
++void setusershell(void);
++void endusershell(void);
++void updwtmpx(const char *file, const struct utmpx *ut);
++int utmpxname(const char *file);
+ #endif
+ 
+ /*
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/include/regex.h b/include/regex.h
+--- a/include/regex.h	1970-01-01 07:30:00.000000000 +0730
++++ b/include/regex.h	2026-11-06 19:02:48.652160685 +0800
+@@ -0,0 +1,71 @@
++#ifndef BB_COMPAT_REGEX_H
++#define BB_COMPAT_REGEX_H 1
++
++/* Android bionic and musl do not provide the GNU regex (re_*) interface that
++ * busybox uses for CONFIG_EXTRA_COMPAT (grep) and CONFIG_FEATURE_VI_REGEX_SEARCH.
++ * This header keeps the POSIX part from the real libc header and adds a
++ * GNU-compatible facade implemented over regcomp()/regexec() in
++ * libbb/missing_syscalls.c. glibc builds are unaffected. */
++
++#if defined(__ANDROID__)
++# define BB_LIBC_HAS_GNU_REGEX 0
++#else
++# include <features.h>
++# if defined(__GLIBC__)
++#  define BB_LIBC_HAS_GNU_REGEX 1
++# elif defined(__UCLIBC__) || defined(__DEFINED_)
++#  define BB_LIBC_HAS_GNU_REGEX 0
++# else
++#  define BB_LIBC_HAS_GNU_REGEX 0
++# endif
++#endif
++
++#if !BB_LIBC_HAS_GNU_REGEX
++/* musl / bionic define regex_t as "struct re_pattern_buffer". Rename that tag
++ * so the classic GNU name can be used for our own struct below. */
++# define re_pattern_buffer bb_libc_internal_re_pattern_buffer
++#endif
++#include_next <regex.h>
++#if !BB_LIBC_HAS_GNU_REGEX
++# undef re_pattern_buffer
++
++typedef char *RE_TRANSLATE_TYPE;
++
++struct re_pattern_buffer {
++	regex_t rx;
++	RE_TRANSLATE_TYPE translate;   /* non-NULL => case-insensitive (-i) */
++	int compiled;
++	int flags;
++	int not_bol;                   /* REG_NOTBOL for the next search */
++	int not_eol;                   /* REG_NOTEOL for the next search */
++};
++
++struct re_registers {
++	unsigned num_regs;
++	regoff_t *start;
++	regoff_t *end;
++};
++
++/* syntax bits (only the ones busybox sets; this is our own encoding) */
++#define RE_ICASE           0x0001
++#define RE_DOT_NEWLINE     0x0002
++#define RE_DOT_NOT_NULL    0x0004
++#define RE_INTERVALS       0x0008
++#define RE_NO_BK_BRACES    0x0010
++#define RE_NO_BK_PARENS    0x0020   /* set => extended regex syntax */
++#define RE_CONTEXT_INDEP_OPS 0x0040
++
++#define RE_SYNTAX_GREP        (RE_INTERVALS)
++#define RE_SYNTAX_EGREP       (RE_NO_BK_PARENS|RE_INTERVALS|RE_NO_BK_BRACES)
++#define RE_SYNTAX_POSIX_BASIC (RE_INTERVALS)
++
++extern unsigned re_syntax_options;
++
++extern const char *re_compile_pattern(const char *pattern, size_t length,
++			struct re_pattern_buffer *bufp);
++extern int re_search(struct re_pattern_buffer *bufp, const char *string,
++			int length, int start, int range,
++			struct re_registers *regs);
++#endif /* !BB_LIBC_HAS_GNU_REGEX */
++
++#endif /* BB_COMPAT_REGEX_H */
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/include/sys/kd.h b/include/sys/kd.h
+--- a/include/sys/kd.h	1970-01-01 07:30:00.000000000 +0730
++++ b/include/sys/kd.h	2026-11-06 16:26:14.000000000 +0800
+@@ -0,0 +1,17 @@
++/*
++ * Android/bionic has no <sys/kd.h> (the glibc wrapper around the Linux
++ * console API). The kernel UAPI <linux/kd.h> that bionic DOES ship already
++ * carries every ioctl, struct and enum the console tools need; only the
++ * old-style font flag macro from glibc's wrapper is absent.
++ */
++#ifndef BB_COMPAT_SYS_KD_H
++#define BB_COMPAT_SYS_KD_H
++
++#include <linux/kd.h>
++
++/* glibc <sys/kd.h>: invoke the old KDFONTOP-style font ioctl */
++#ifndef KD_FONT_FLAG_OLD
++# define KD_FONT_FLAG_OLD 0x80000000
++#endif
++
++#endif /* BB_COMPAT_SYS_KD_H */
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/include/sys/msg.h b/include/sys/msg.h
+--- a/include/sys/msg.h	1970-01-01 07:30:00.000000000 +0730
++++ b/include/sys/msg.h	2026-11-06 19:49:19.534959360 +0800
+@@ -0,0 +1,14 @@
++/* bionic only exposes the System V message-queue calls from API 26 on. */
++#ifndef BB_SYS_MSG_COMPAT_H
++#define BB_SYS_MSG_COMPAT_H
++#include_next <sys/msg.h>
++#if defined(__BIONIC__) && __ANDROID_API__ < 26
++#include <sys/cdefs.h>
++__BEGIN_DECLS
++int msgget(key_t key, int msgflg);
++int msgctl(int msqid, int cmd, struct msqid_ds *buf);
++ssize_t msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msgflg);
++int msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg);
++__END_DECLS
++#endif
++#endif
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/include/sys/sem.h b/include/sys/sem.h
+--- a/include/sys/sem.h	1970-01-01 07:30:00.000000000 +0730
++++ b/include/sys/sem.h	2026-11-06 19:31:52.389647730 +0800
+@@ -0,0 +1,13 @@
++/* bionic only exposes the System V semaphore calls from API 26 on. */
++#ifndef BB_SYS_SEM_COMPAT_H
++#define BB_SYS_SEM_COMPAT_H
++#include_next <sys/sem.h>
++#if defined(__BIONIC__) && __ANDROID_API__ < 26
++#include <sys/cdefs.h>
++__BEGIN_DECLS
++int semget(key_t key, int nsems, int semflg);
++int semop(int semid, struct sembuf *sops, size_t nsops);
++int semctl(int semid, int semnum, int cmd, ...);
++__END_DECLS
++#endif
++#endif
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/include/sys/shm.h b/include/sys/shm.h
+--- a/include/sys/shm.h	1970-01-01 07:30:00.000000000 +0730
++++ b/include/sys/shm.h	2026-11-06 19:31:52.389647730 +0800
+@@ -0,0 +1,15 @@
++/* bionic only exposes the System V shared-memory calls from API 26 on.
++ * Android 7 (API 24) is our floor, so declare + provide them ourselves. */
++#ifndef BB_SYS_SHM_COMPAT_H
++#define BB_SYS_SHM_COMPAT_H
++#include_next <sys/shm.h>
++#if defined(__BIONIC__) && __ANDROID_API__ < 26
++#include <sys/cdefs.h>
++__BEGIN_DECLS
++void *shmat(int shmid, const void *shmaddr, int shmflg);
++int shmctl(int shmid, int cmd, struct shmid_ds *buf);
++int shmdt(const void *shmaddr);
++int shmget(key_t key, size_t size, int shmflg);
++__END_DECLS
++#endif
++#endif
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/libbb/missing_syscalls.c b/libbb/missing_syscalls.c
+--- a/libbb/missing_syscalls.c	2023-01-05 23:29:10.000000000 +0800
++++ b/libbb/missing_syscalls.c	2026-11-06 20:03:47.310230525 +0800
+@@ -10,6 +10,7 @@
+ #if defined(ANDROID) || defined(__ANDROID__)
+ /*# include <linux/timex.h> - for struct timex, but may collide with <time.h> */
+ # include <sys/syscall.h>
++# if __ANDROID_API__ < 21
+ pid_t getsid(pid_t pid)
+ {
+ 	return syscall(__NR_getsid, pid);
+@@ -25,6 +26,7 @@
+ {
+ 	return syscall(__NR_adjtimex, buf);
+ }
++# endif
+ 
+ int pivot_root(const char *new_root, const char *put_old)
+ {
+@@ -37,4 +39,608 @@
+ 	return ioctl(fd, TCSBRK, 1);
+ }
+ # endif
++
++# ifdef __BIONIC__
++/*
++ * Interfaces bionic deliberately never shipped, but the corresponding
++ * applets still need to exist:
++ *   gethostid()      - hostid
++ *   explicit_bzero() - yescrypt (CONFIG_USE_BB_CRYPT_YES)
++ *   getusershell()   - su
++ *   updwtmpx()       - utmp/wtmp/last/wtmpd
++ *   ether_hostton()  - ether-wake
++ * Each reads the classic configuration file when it is present and
++ * degrades to an empty/no-op result when Android does not have it, so the
++ * applet keeps working and only the data source may be missing.
++ */
++#  include <fcntl.h>
++#  include <utmpx.h>
++#  include <netinet/ether.h>
++
++#define BB_COMPAT_BUF 512
++
++/* bionic has no getlogin_r(): Android has no utmp/login session.
++ * Emulate via LOGNAME / getpwuid(uid), which is what logname applet wants. */
++int getlogin_r(char *buf, size_t bufsize)
++{
++	const char *name = getenv("LOGNAME");
++	struct passwd *pw;
++
++	if (!name || !*name) {
++		pw = getpwuid(getuid());
++		name = pw ? pw->pw_name : NULL;
++	}
++	if (!name || !*name)
++		return ENOENT;
++	if (strlen(name) >= bufsize)
++		return ERANGE;
++	strcpy(buf, name);
++	return 0;
++}
++
++long FAST_FUNC gethostid(void)
++{
++	char buf[BB_COMPAT_BUF];
++	uint32_t id;
++	unsigned h = 0;
++	int i, fd;
++
++	/* glibc reads /etc/hostid; otherwise derive a stable value */
++	fd = open("/etc/hostid", O_RDONLY);
++	if (fd >= 0) {
++		if (read(fd, &id, sizeof(id)) == (ssize_t)sizeof(id)) {
++			close(fd);
++			return (long)id;
++		}
++		close(fd);
++	}
++	if (gethostname(buf, sizeof(buf)) != 0)
++		return 0;
++	buf[sizeof(buf) - 1] = '\0';
++	for (i = 0; buf[i]; i++)
++		h = h * 33 + (unsigned char)buf[i];
++	return (long)h;
++}
++
++void explicit_bzero(void *p, size_t len)
++{
++	memset(p, 0, len);
++	/* keep the compiler from eliding the wipe */
++	__asm__ __volatile__("" : : "r"(p) : "memory");
++}
++
++char* getusershell(void)
++{
++	static char *cur;
++	static char buf[BB_COMPAT_BUF];
++	static int fallback_idx;
++	static const char *const dflt[] = {
++		"/system/bin/sh", "/system/xbin/sh", "/bin/sh", "/bin/ash"
++	};
++
++	if (!cur) {
++		FILE *fp = fopen("/etc/shells", "r");
++		if (fp) {
++			size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
++			fclose(fp);
++			buf[n] = '\0';
++			cur = buf;
++			if (!*cur)
++				cur = NULL;
++		}
++	}
++	while (cur && *cur) {
++		char *nl = strchr(cur, '\n');
++		char *line = skip_whitespace(cur);
++		if (nl) {
++			*nl = '\0';
++			cur = nl + 1;
++		} else {
++			cur = NULL;
++		}
++		if (line[0] && line[0] != '#')
++			return line;
++	}
++	if (fallback_idx < (int)ARRAY_SIZE(dflt))
++		return (char *)dflt[fallback_idx++];
++	return NULL;
++}
++
++void setusershell(void)
++{
++	/* restart iteration over the cached list: nothing to do */
++}
++
++void endusershell(void)
++{
++	/* the list lives in static storage: nothing to release */
++}
++
++void updwtmpx(const char *file, const struct utmpx *ut)
++{
++	int fd = open(file, O_WRONLY | O_APPEND | O_CREAT, 0644);
++
++	if (fd < 0)
++		return; /* no wtmp on Android: caller simply gets no record */
++	write(fd, ut, sizeof(*ut));
++	close(fd);
++}
++
++int utmpxname(const char *file)
++{
++	/* bionic has no utmp file at all; the reader is a stub too,
++	 * so accepting the name and returning success is the best we can do */
++	(void)file;
++	return 0;
++}
++
++int ether_hostton(const char *hostname, struct ether_addr *addr)
++{
++	char line[128];
++	FILE *fp = fopen("/etc/ethers", "r");
++
++	if (!fp)
++		return -1;
++	while (fgets(line, sizeof(line), fp)) {
++		char *mac = skip_whitespace(line);
++		char *name, *end;
++		struct ether_addr *ea;
++
++		if (mac[0] == '#' || mac[0] == '\0')
++			continue;
++		name = strchr(mac, ' ');
++		if (!name)
++			name = strchr(mac, '\t');
++		if (!name)
++			continue;
++		*name++ = '\0';
++		name = skip_whitespace(name);
++		end = name + strlen(name);
++		while (end > name && (unsigned char)end[-1] <= ' ')
++			end--;
++		*end = '\0';
++		if (strcmp(name, hostname) != 0)
++			continue;
++		ea = ether_aton(mac);
++		if (!ea)
++			continue;
++		memcpy(addr, ea, sizeof(*addr));
++		fclose(fp);
++		return 0; /* 0 = found, matches busybox's check */
++	}
++	fclose(fp);
++	return -1;
++}
++# endif /* __BIONIC__ */
+ #endif
++
++/* ---------- GNU regex compatibility (bionic / musl) ---------- */
++#if !BB_LIBC_HAS_GNU_REGEX
++#include <regex.h>
++
++unsigned re_syntax_options;
++
++const char *re_compile_pattern(const char *pattern, size_t length,
++			       struct re_pattern_buffer *bufp)
++{
++	char *pat;
++	int cflags = 0;
++	int r;
++
++	pat = xmalloc(length + 1);
++	memcpy(pat, pattern, length);
++	pat[length] = '\0';
++
++	if (re_syntax_options & RE_NO_BK_PARENS)
++		cflags |= REG_EXTENDED;
++	if ((re_syntax_options & RE_ICASE) || bufp->translate)
++		cflags |= REG_ICASE;
++
++	r = regcomp(&bufp->rx, pat, cflags);
++	free(pat);
++	bufp->compiled = (r == 0);
++	return (r == 0) ? NULL : "Invalid regular expression";
++}
++
++int re_search(struct re_pattern_buffer *bufp, const char *string, int length,
++	      int start, int range, struct re_registers *regs)
++{
++	regmatch_t pm[10];
++	int i, rc;
++	int eflags = 0;
++
++	(void)range;
++	if (!bufp->compiled || start < 0 || start > length)
++		return -1;
++
++	if (bufp->not_bol)
++		eflags |= REG_NOTBOL;
++	if (bufp->not_eol)
++		eflags |= REG_NOTEOL;
++
++	rc = regexec(&bufp->rx, string + start, 10, pm, eflags);
++	if (rc != 0)
++		return -1;
++
++	if (regs) {
++		if (!regs->start) {
++			regs->start = xmalloc(10 * sizeof(regoff_t));
++			regs->end = xmalloc(10 * sizeof(regoff_t));
++		}
++		regs->num_regs = 10;
++		for (i = 0; i < 10; i++) {
++			if (pm[i].rm_so < 0) {
++				regs->start[i] = -1;
++				regs->end[i] = -1;
++			} else {
++				regs->start[i] = start + pm[i].rm_so;
++				regs->end[i] = start + pm[i].rm_eo;
++			}
++		}
++	}
++	return start + (int)pm[0].rm_so;
++}
++#endif /* !BB_LIBC_HAS_GNU_REGEX */
++
++/* bionic only exposes syncfs() from API 28 on; emulate with global sync()
++ * for older API levels so "sync -f" style applets still build and run. */
++#if defined(__BIONIC__)
++#include <mntent.h>
++/* Android /etc/mtab is a read-only symlink to /proc/mounts: writes are moot */
++int addmntent(FILE *fp, const struct mntent *mnt)
++{
++	(void)fp; (void)mnt;
++	return 0;
++}
++#endif
++
++#if defined(__BIONIC__)
++#include <sys/syscall.h>
++/* bionic does not expose vhangup() at all; the syscall exists in the kernel */
++int vhangup(void)
++{
++	return (int)syscall(SYS_vhangup);
++}
++#endif
++
++#if defined(__BIONIC__) && __ANDROID_API__ < 26
++#include <sys/shm.h>
++#include <sys/sem.h>
++#include <sys/syscall.h>
++#include <stdarg.h>
++
++#if defined(__aarch64__)
++# define BB_NR_shmat 196
++# define BB_NR_shmdt 197
++# define BB_NR_shmget 194
++# define BB_NR_shmctl 195
++# define BB_NR_semget 190
++# define BB_NR_semop 193
++# define BB_NR_semctl 191
++#elif defined(__arm__)
++# define BB_NR_shmat 305
++# define BB_NR_shmdt 306
++# define BB_NR_shmget 307
++# define BB_NR_shmctl 308
++# define BB_NR_semget 299
++# define BB_NR_semop 298
++# define BB_NR_semctl 300
++#elif defined(__x86_64__)
++# define BB_NR_shmat 30
++# define BB_NR_shmdt 67
++# define BB_NR_shmget 29
++# define BB_NR_shmctl 31
++# define BB_NR_semget 64
++# define BB_NR_semop 65
++# define BB_NR_semctl 66
++#else /* i386: semop has no direct syscall, it is multiplexed via ipc(117) */
++# define BB_NR_shmat 397
++# define BB_NR_shmdt 398
++# define BB_NR_shmget 395
++# define BB_NR_shmctl 396
++# define BB_NR_semget 393
++# define BB_NR_semctl 394
++# define BB_NR_ipc 117
++#endif
++
++void *shmat(int shmid, const void *shmaddr, int shmflg)
++{
++	return (void *)syscall(BB_NR_shmat, shmid, shmaddr, shmflg);
++}
++
++int shmdt(const void *shmaddr)
++{
++	return (int)syscall(BB_NR_shmdt, shmaddr);
++}
++
++int shmget(key_t key, size_t size, int shmflg)
++{
++	return (int)syscall(BB_NR_shmget, key, size, shmflg);
++}
++
++int shmctl(int shmid, int cmd, struct shmid_ds *buf)
++{
++	return (int)syscall(BB_NR_shmctl, shmid, cmd, buf);
++}
++
++int semget(key_t key, int nsems, int semflg)
++{
++	return (int)syscall(BB_NR_semget, key, nsems, semflg);
++}
++
++int semop(int semid, struct sembuf *sops, size_t nsops)
++{
++#if defined(BB_NR_semop)
++	return (int)syscall(BB_NR_semop, semid, sops, nsops);
++#else
++	/* i386: SEMOP == 3 through the legacy ipc() multiplexer */
++	return (int)syscall(BB_NR_ipc, 3, semid, nsops, 0, sops, 0);
++#endif
++}
++
++int semctl(int semid, int semnum, int cmd, ...)
++{
++	va_list ap;
++	void *arg;
++
++	va_start(ap, cmd);
++	arg = va_arg(ap, void *);
++	va_end(ap);
++	return (int)syscall(BB_NR_semctl, semid, semnum, cmd, arg);
++}
++#endif /* bionic API < 26 */
++
++/* bionic ships <glob.h> (types and flags) but no glob() at all, so hush's
++ * pathname expansion would not link. Provide a POSIX-ish implementation. */
++#if defined(__BIONIC__)
++#include <fnmatch.h>
++#include <dirent.h>
++#include <sys/stat.h>
++#include <string.h>
++#include <stdlib.h>
++
++# ifndef GLOB_PERIOD
++#  define GLOB_PERIOD 0   /* GNU extension; bionic glob.h does not define it */
++# endif
++typedef struct { glob_t *g; int flags; } gctx;
++
++static int g_add(gctx *c, const char *path)
++{
++	glob_t *g = c->g;
++	char **nv;
++	size_t n = g->gl_pathc;
++	nv = realloc(g->gl_pathv, (n + 2) * sizeof(char *));
++	if (!nv) return GLOB_NOSPACE;
++	g->gl_pathv = nv;
++	nv[n] = strdup(path);
++	if (!nv[n]) return GLOB_NOSPACE;
++	nv[n + 1] = NULL;
++	g->gl_pathc = n + 1;
++	return 0;
++}
++
++static int is_dir(const char *p)
++{
++	struct stat st;
++	return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
++}
++
++static int exists(const char *p)
++{
++	struct stat st;
++	return stat(p, &st) == 0;
++}
++
++static char *join(const char *pre, const char *comp, int dir)
++{
++	size_t pl = strlen(pre), cl = strlen(comp);
++	char *r = malloc(pl + cl + 2);
++	if (!r) return NULL;
++	memcpy(r, pre, pl);
++	memcpy(r + pl, comp, cl);
++	if (dir && (cl == 0 || comp[cl - 1] != '/')) {
++		r[pl + cl] = '/';
++		r[pl + cl + 1] = '\0';
++	} else {
++		r[pl + cl] = '\0';
++	}
++	return r;
++}
++
++static int walk_(gctx *c, const char *prefix, const char *rest, int depth);
++
++static int walk_meta(gctx *c, const char *prefix, const char *comp,
++		     const char *next, int last, int depth)
++{
++	DIR *d;
++	struct dirent *de;
++	int rc = 0;
++	const char *dp = *prefix ? prefix : ".";
++
++	d = opendir(dp);
++	if (!d)
++		return 0;
++	while ((de = readdir(d)) != NULL) {
++		char *full;
++
++		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
++			if (strcmp(de->d_name, comp) != 0)
++				continue;
++		}
++		if (de->d_name[0] == '.'
++		 && !(c->flags & GLOB_PERIOD)
++		 && comp[0] != '.'
++		 && strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0)
++			continue;
++		if (fnmatch(comp, de->d_name, 0) != 0)
++			continue;
++		full = join(prefix, de->d_name, !last);
++		if (!full) { rc = GLOB_NOSPACE; break; }
++		if (!last) {
++			if (is_dir(full)) {
++				int r = walk_(c, full, next, depth + 1);
++				if (r == GLOB_NOSPACE) { free(full); rc = r; break; }
++			}
++			free(full);
++		} else {
++			int r = g_add(c, full);
++			free(full);
++			if (r) { rc = r; break; }
++		}
++	}
++	closedir(d);
++	return rc;
++}
++
++static int walk_(gctx *c, const char *prefix, const char *rest, int depth)
++{
++	const char *slash;
++	char *comp;
++	size_t cl;
++	int last, rc = 0, meta;
++
++	if (depth > 32)
++		return GLOB_NOSPACE;
++
++	slash = strchr(rest, '/');
++	cl = slash ? (size_t)(slash - rest) : strlen(rest);
++	last = (slash == NULL);
++	comp = malloc(cl + 1);
++	if (!comp) return GLOB_NOSPACE;
++	memcpy(comp, rest, cl);
++	comp[cl] = '\0';
++
++	if (last && cl == 0) {          /* trailing '/' : the directory itself */
++		if (exists(prefix))
++			rc = g_add(c, prefix);
++		free(comp);
++		return rc;
++	}
++
++	meta = (strpbrk(comp, "*?[") != NULL);
++	if (!meta) {
++		char *full = join(prefix, comp, !last);
++		if (!full) { free(comp); return GLOB_NOSPACE; }
++		if (!last) {
++			if (is_dir(full))
++				rc = walk_(c, full, slash + 1, depth + 1);
++		} else if (exists(full)) {
++			rc = g_add(c, full);
++		}
++		free(full);
++		free(comp);
++		return rc;
++	}
++
++	rc = walk_meta(c, prefix, comp, last ? NULL : slash + 1, last, depth);
++	free(comp);
++	return rc;
++}
++
++static int cmp_str(const void *a, const void *b)
++{
++	return strcmp(*(const char *const *)a, *(const char *const *)b);
++}
++
++int glob(const char *pattern, int flags,
++	 int (*errfunc)(const char *, int), glob_t *pglob)
++{
++	gctx c;
++	char *prefix;
++	const char *rest;
++	int rc;
++
++	if (!(flags & GLOB_APPEND)) {
++		pglob->gl_pathc = 0;
++		pglob->gl_pathv = NULL;
++	}
++	c.g = pglob;
++	c.flags = flags;
++	if (pattern[0] == '/') {
++		prefix = strdup("/");
++		rest = pattern + 1;
++	} else {
++		prefix = strdup("");
++		rest = pattern;
++	}
++	if (!prefix)
++		return GLOB_NOSPACE;
++	rc = walk_(&c, prefix, rest, 0);
++	free(prefix);
++	if (rc == GLOB_NOSPACE)
++		return rc;
++	if (pglob->gl_pathc == 0) {
++		if (flags & GLOB_NOCHECK) {
++			if (g_add(&c, pattern))
++				return GLOB_NOSPACE;
++		} else
++			return GLOB_NOMATCH;
++	}
++	if (!(flags & GLOB_NOSORT))
++		qsort(pglob->gl_pathv, pglob->gl_pathc, sizeof(char *), cmp_str);
++	return 0;
++}
++
++void globfree(glob_t *pglob)
++{
++	size_t i;
++
++	if (!pglob->gl_pathv)
++		return;
++	for (i = 0; i < pglob->gl_pathc; i++)
++		free(pglob->gl_pathv[i]);
++	free(pglob->gl_pathv);
++	pglob->gl_pathv = NULL;
++	pglob->gl_pathc = 0;
++}
++
++
++#endif
++
++#if defined(__BIONIC__) && __ANDROID_API__ < 26
++#include <sys/msg.h>
++#include <sys/syscall.h>
++
++#if defined(__aarch64__)
++# define BB_NR_msgget 186
++# define BB_NR_msgctl 187
++# define BB_NR_msgrcv 188
++# define BB_NR_msgsnd 189
++#elif defined(__arm__)
++# define BB_NR_msgget 303
++# define BB_NR_msgctl 304
++# define BB_NR_msgrcv 302
++# define BB_NR_msgsnd 301
++#elif defined(__x86_64__)
++# define BB_NR_msgget 68
++# define BB_NR_msgctl 69
++# define BB_NR_msgrcv 70
++# define BB_NR_msgsnd 71
++#else
++# define BB_NR_msgget 399
++# define BB_NR_msgsnd 400
++# define BB_NR_msgrcv 401
++# define BB_NR_msgctl 402
++#endif
++
++int msgget(key_t key, int msgflg)
++{
++	return (int)syscall(BB_NR_msgget, key, msgflg);
++}
++
++int msgctl(int msqid, int cmd, struct msqid_ds *buf)
++{
++	return (int)syscall(BB_NR_msgctl, msqid, cmd, buf);
++}
++
++ssize_t msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msgflg)
++{
++	return (ssize_t)syscall(BB_NR_msgrcv, msqid, msgp, msgsz, msgtyp, msgflg);
++}
++
++int msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg)
++{
++	return (int)syscall(BB_NR_msgsnd, msqid, msgp, msgsz, msgflg);
++}
++#endif /* bionic API < 26 */
++
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/Makefile.flags b/Makefile.flags
+--- a/Makefile.flags	2024-09-26 22:00:52.000000000 +0800
++++ b/Makefile.flags	2026-11-06 16:26:14.000000000 +0800
+@@ -186,8 +186,11 @@
+ 
+ ifeq ($(CONFIG_FEATURE_NSLOOKUP_BIG),y)
+ ifneq (,$(findstring linux,$(shell $(CC) $(CFLAGS) -dumpmachine)))
++ifeq (,$(findstring android,$(shell $(CC) $(CFLAGS) -dumpmachine)))
++# bionic has no standalone libresolv; resolver symbols live in libc
+ LDLIBS += resolv
+ endif
++endif
+ ifneq (,$(findstring gnu,$(shell $(CC) $(CFLAGS) -dumpmachine)))
+ LDLIBS += resolv
+ endif
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/miscutils/adjtimex.c b/miscutils/adjtimex.c
+--- a/miscutils/adjtimex.c	2024-04-16 15:23:50.000000000 +0800
++++ b/miscutils/adjtimex.c	2026-11-06 16:26:14.000000000 +0800
+@@ -33,11 +33,9 @@
+ //usage:     "\n	-p TCONST"
+ 
+ #include "libbb.h"
+-#ifdef __BIONIC__
+-# include <linux/timex.h>
+-#else
+-# include <sys/timex.h>
+-#endif
++/* bionic: struct timex lives in <linux/timex.h>, but adjtimex() itself is
++ * declared only in <sys/timex.h> (which pulls in linux/timex.h anyway). */
++#include <sys/timex.h>
+ 
+ static const uint16_t statlist_bit[] ALIGN2 = {
+ 	STA_PLL,
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/networking/ifconfig.c b/networking/ifconfig.c
+--- a/networking/ifconfig.c	2026-04-17 23:44:06.000000000 +0800
++++ b/networking/ifconfig.c	2026-11-06 16:26:14.000000000 +0800
+@@ -127,7 +127,8 @@
+ # define IFF_DYNAMIC     0x8000	/* dialup device with changing addresses */
+ #endif
+ 
+-#if ENABLE_FEATURE_IPV6
++#if ENABLE_FEATURE_IPV6 && !defined(__BIONIC__)
++/* bionic's <linux/ipv6.h> already defines struct in6_ifreq */
+ struct in6_ifreq {
+ 	struct in6_addr ifr6_addr;
+ 	uint32_t ifr6_prefixlen;
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/networking/interface.c b/networking/interface.c
+--- a/networking/interface.c	2023-01-05 23:29:10.000000000 +0800
++++ b/networking/interface.c	2026-11-06 16:26:14.000000000 +0800
+@@ -53,7 +53,8 @@
+ #define _PATH_PROCNET_DEV               "/proc/net/dev"
+ #define _PATH_PROCNET_IFINET6           "/proc/net/if_inet6"
+ 
+-#ifdef HAVE_AFINET6
++#if defined(HAVE_AFINET6) && !defined(__BIONIC__)
++/* bionic's <linux/ipv6.h> already defines struct in6_ifreq */
+ # ifndef _LINUX_IN6_H
+ /*
+  * This is from linux/include/net/ipv6.h
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/scripts/gen_build_files.sh b/scripts/gen_build_files.sh
+--- a/scripts/gen_build_files.sh	2023-01-05 23:29:10.000000000 +0800
++++ b/scripts/gen_build_files.sh	2026-11-06 16:26:14.000000000 +0800
+@@ -40,14 +40,16 @@
+ 	header="$3"
+ 	loc="$4"
+ 	#chk "${dst}"
++	bodyf="${dst}.body.$$"
++	cat >"$bodyf"
+ 	{
+ 		# Need to use printf: different shells have inconsistent
+ 		# rules re handling of "\n" in echo params.
+ 		printf "%s\n" "${header}"
+ 		# print everything up to INSERT line
+ 		sed -n '/^INSERT$/ q; p' "${src}"
+-		# copy stdin to stdout
+-		cat
++		# copy buffered stdin
++		cat "$bodyf"
+ 		if [ -n "$loc" ]
+ 		then
+ 			custom_scripts "$loc"
+@@ -60,6 +62,7 @@
+ 		    bl
+ 		}' "${src}"
+ 	} >"${dst}.tmp"
++	rm -f "$bodyf"
+ 	if ! cmp -s "${dst}" "${dst}.tmp"; then
+ 		gen "${dst}"
+ 		mv "${dst}.tmp" "${dst}"
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/shell/hush.c b/shell/hush.c
+--- a/shell/hush.c	2026-05-13 10:10:19.000000000 +0800
++++ b/shell/hush.c	2026-11-06 16:26:14.000000000 +0800
+@@ -373,6 +373,18 @@
+ #include <sys/utsname.h> /* for setting $HOSTNAME */
+ 
+ #include "busybox.h"  /* for APPLET_IS_NOFORK/NOEXEC */
++#ifdef __BIONIC__
++/* bionic does not provide sigisemptyset() (glibc extension) */
++static inline int sigisemptyset(const sigset_t *set)
++{
++	const unsigned char *p = (const unsigned char *)set;
++	size_t i;
++	for (i = 0; i < sizeof(*set); i++)
++		if (p[i])
++			return 0;
++	return 1;
++}
++#endif
+ #include "unicode.h"
+ #include "shell_common.h"
+ #include "math.h"
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/util-linux/ipcrm.c b/util-linux/ipcrm.c
+--- a/util-linux/ipcrm.c	2024-04-16 15:23:50.000000000 +0800
++++ b/util-linux/ipcrm.c	2026-11-06 16:26:14.000000000 +0800
+@@ -28,7 +28,7 @@
+ #include <sys/msg.h>
+ #include <sys/sem.h>
+ 
+-#if defined(__GNU_LIBRARY__) && !defined(_SEM_SEMUN_UNDEFINED)
++#if (defined(__GNU_LIBRARY__) && !defined(_SEM_SEMUN_UNDEFINED)) || defined(__BIONIC__)
+ /* union semun is defined by including <sys/sem.h> */
+ #else
+ /* according to X/OPEN we have to define it ourselves */
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/util-linux/ipcs.c b/util-linux/ipcs.c
+--- a/util-linux/ipcs.c	2024-04-16 15:23:50.000000000 +0800
++++ b/util-linux/ipcs.c	2026-11-06 16:26:14.000000000 +0800
+@@ -71,7 +71,7 @@
+ /* The last arg of semctl is a union semun, but where is it defined?
+    X/OPEN tells us to define it ourselves, but until recently
+    Linux include files would also define it. */
+-#if defined(__GNU_LIBRARY__) && !defined(_SEM_SEMUN_UNDEFINED)
++#if (defined(__GNU_LIBRARY__) && !defined(_SEM_SEMUN_UNDEFINED)) || defined(__BIONIC__)
+ /* union semun is defined by including <sys/sem.h> */
+ #else
+ /* according to X/OPEN we have to define it ourselves */
+diff -ruN '--exclude=.config' '--exclude=busybox' '--exclude=*.o' '--exclude=*.a' '--exclude=.*.cmd' '--exclude=include/autoconf.h' '--exclude=include/build' '--exclude=.config.old' a/util-linux/swaponoff.c b/util-linux/swaponoff.c
+--- a/util-linux/swaponoff.c	2023-01-05 23:29:10.000000000 +0800
++++ b/util-linux/swaponoff.c	2026-11-06 16:26:14.000000000 +0800
+@@ -75,9 +75,9 @@
+ #include "libbb.h"
+ #include "common_bufsiz.h"
+ #include <mntent.h>
+-#ifndef __BIONIC__
+-# include <sys/swap.h>
+-#endif
++/* bionic declares swapon()/swapoff() and SWAP_FLAG_* in <sys/swap.h>
++ * (they are not in <unistd.h> like on glibc), so include it everywhere */
++#include <sys/swap.h>
+ 
+ #if ENABLE_FEATURE_SWAPONOFF_LABEL
+ # include "volume_id.h"
